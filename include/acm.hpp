@@ -336,7 +336,7 @@ class ASN1_Codec : public tool::Tool {
 
         bool decode_message( pugi::xml_node& payload_node, std::stringstream& output_message_stream );
         bool decode_message_legacy( pugi::xml_node& payload_node, std::stringstream& output_message_stream );
-        bool decode_1609dot2_data( std::string& data_as_hex, buffer_structure_t* xml_buffer );
+        bool decode_1609dot2_data( std::string& data_as_hex, buffer_structure_t* xml_buffer, bool validate_constraints = true );
         
 
         bool encode_message( std::stringstream& output_message_stream );

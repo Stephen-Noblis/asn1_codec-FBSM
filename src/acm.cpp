@@ -54,6 +54,8 @@
 #include <chrono>
 #include <thread>
 #include <cstdio>
+#include <algorithm>
+#include <cctype>
 
 // for both windows and linux.
 #include <sys/types.h>
@@ -72,6 +74,8 @@
 #include <getopt.h>
 #include <unistd.h>
 #endif
+
+#include <iostream>
 
 /**
  * @brief predicate indicating whether a file exists on the filesystem.
@@ -823,6 +827,10 @@ bool ASN1_Codec::add_error_xml( pugi::xml_document& doc, Asn1DataType dt, Asn1Er
 }
 
 bool ASN1_Codec::hex_to_bytes_(const std::string& payload_hex, std::vector<char>& buf) {
+    if (payload_hex.size() % 2 != 0) {
+        return false;
+    }
+
     uint8_t d = 0;
     int i = 0;          // so we can return -1;
 
@@ -1048,6 +1056,7 @@ bool ASN1_Codec::decode_message( pugi::xml_node& payload_node, std::stringstream
         throw MissingInputElementError{"An decoder was not specified in the encodingType tag that this module understands."};
     }
 
+
     // access this directly because we remove the bytes branch.
     pugi::xml_text text = payload_node.child("bytes").text();
 
@@ -1056,10 +1065,97 @@ bool ASN1_Codec::decode_message( pugi::xml_node& payload_node, std::stringstream
         std::string hstr{ text.get() };
         payload_node.remove_child("bytes");
 
+        // ADDED - START
+        std::cerr << "A" << std::endl;
+        std::cerr.flush();
+
+        pugi::xml_node metadata_node = input_doc.child("OdeAsn1Data").child("metadata");
+        if (!metadata_node) {
+            throw MissingInputElementError{"Could not find OdeAsn1Data/metadata."};
+        }
+
+        std::string full_hex;
+        pugi::xml_text full_text = metadata_node.child("asn1Full").text();
+        if (full_text) {
+            full_hex = std::string(full_text.get());
+        }
+
+        full_hex.erase(
+            std::remove_if(full_hex.begin(), full_hex.end(),
+                           [](unsigned char ch) { return std::isspace(ch); }),
+            full_hex.end());
+
+        if (!full_hex.empty()) {
+            try {
+                if (full_hex.size() % 2 != 0) {
+                    pugi::xml_node err_node = metadata_node.child("ieee1609dot2DecodeError");
+                    if (!err_node) {
+                        err_node = metadata_node.append_child("ieee1609dot2DecodeError");
+                    }
+                    err_node.text().set("asn1Full has an odd number of hex characters");
+                } else {
+                    buffer_structure_t ieee_xb = {0,0,0};
+
+                    std::cerr << "A1 before decode_1609dot2_data, len=" << full_hex.size() << std::endl;
+                    std::cerr.flush();
+
+                    decode_1609dot2_data(full_hex, &ieee_xb, false);
+
+                    std::cerr << "A2 after decode_1609dot2_data, xb.buffer_size=" << ieee_xb.buffer_size << std::endl;
+                    std::cerr.flush();
+
+                    pugi::xml_document ieee_doc;
+                    pugi::xml_parse_result ieee_parse_result =
+                        ieee_doc.load_buffer(static_cast<const void*>(ieee_xb.buffer), ieee_xb.buffer_size);
+
+                    std::cerr << "A3 after load_buffer" << std::endl;
+                    std::cerr.flush();
+
+                    if (!ieee_parse_result) {
+                        std::ostringstream erroross;
+                        erroross << "IEEE 1609.2 decoded XER cannot be parsed/loaded as a valid document: "
+                                 << ieee_parse_result.description()
+                                 << " at offset " << ieee_parse_result.offset;
+                        std::free(static_cast<void*>(ieee_xb.buffer));
+                        throw Asn1CodecError{ erroross.str() };
+                    }
+
+                    std::ostringstream ieee_xml_ss;
+                    ieee_doc.document_element().print(ieee_xml_ss, "", pugi::format_raw);
+                    std::string ieee_xml = ieee_xml_ss.str();
+
+                    std::cerr << "A4 after document print, xml_size=" << ieee_xml.size() << std::endl;
+                    std::cerr.flush();
+
+                    pugi::xml_node ieee_node = metadata_node.child("ieee1609dot2DecodedXml");
+                    if (!ieee_node) {
+                        ieee_node = metadata_node.append_child("ieee1609dot2DecodedXml");
+                    }
+                    ieee_node.text().set(ieee_xml.c_str());
+
+                    std::cerr << "A5 after metadata append" << std::endl;
+                    std::cerr.flush();
+
+                    std::free(static_cast<void*>(ieee_xb.buffer));
+                }
+            } catch (const Asn1CodecError& e) {
+                pugi::xml_node err_node = metadata_node.child("ieee1609dot2DecodeError");
+                if (!err_node) {
+                    err_node = metadata_node.append_child("ieee1609dot2DecodeError");
+                }
+                err_node.text().set(e.what());
+            }
+        }
+
+        std::cerr << "B" << std::endl;
+        std::cerr.flush();
+
+        //ADDED - END
+
         // Ieee 1609.2 is the outer frame.
 		if ( decode_1609dot2 ) {
 
-			decode_1609dot2_data(hstr, &xb);            // throws.
+			decode_1609dot2_data(hstr, &xb, true);            // throws.
 
 			// asssert success == true;
 
@@ -1072,6 +1168,30 @@ bool ASN1_Codec::decode_message( pugi::xml_node& payload_node, std::stringstream
 				erroross << "IEEE 1609.2 decoded XER cannot be parsed/loaded as a valid document: " << parse_result.description() << " at offset " << parse_result.offset;
 				throw Asn1CodecError{ erroross.str() };
 			}
+            
+            // DEVELOPMENT -- KEEP IEEE1609DOT2DATA
+            // ------------------------------------
+            std::cerr << "C" << std::endl;
+
+            std::ostringstream ieee_xml_ss;
+            internal_doc.document_element().print(ieee_xml_ss, "", pugi::format_raw);
+            std::string ieee_xml = ieee_xml_ss.str();
+
+
+            pugi::xml_node metadata_node = input_doc.child("OdeAsn1Data").child("metadata");
+            if (!metadata_node) {
+                throw MissingInputElementError{"Could not find OdeAsn1Data/metadata to attach IEEE 1609.2 decode output."};
+            }
+            metadata_node.append_child("debugAcmPatch").text().set("PATCH_ACTIVE");
+
+            pugi::xml_node ieee_node = metadata_node.child("ieee1609dot2DecodedXml");
+            if (!ieee_node) {
+                ieee_node = metadata_node.append_child("ieee1609dot2DecodedXml");
+            }
+            ieee_node.text().set(ieee_xml.c_str());
+            std::cerr << "A" << std::endl;
+
+            // ------------------------------------
 
 			// XPath search the IEEE structure for the unsecured data.
 			pugi::xpath_node unsecuredDataNode = ieee1609dot2_unsecuredData_query.evaluate_node( internal_doc );
@@ -1254,7 +1374,11 @@ bool ASN1_Codec::encode_message( std::stringstream& output_message_stream ) {
  */
 
 // throws Asn1CodecError ONLY!
-bool ASN1_Codec::decode_1609dot2_data( std::string& data_as_hex, buffer_structure_t* xml_buffer ) {
+bool ASN1_Codec::decode_1609dot2_data(
+    std::string& data_as_hex,
+    buffer_structure_t* xml_buffer,
+    bool validate_constraints
+) {
     const std::string fnname = "decode_1609dot2_data()";
 
     // enum asn_dec_rval_code_e {
@@ -1284,7 +1408,13 @@ bool ASN1_Codec::decode_1609dot2_data( std::string& data_as_hex, buffer_structur
     logger->trace(fnname + ": starting...");
 
     // remove all spaces.
+    std::cerr << "D1 start decode_1609dot2_data" << std::endl;
+    std::cerr.flush();
+
     data_as_hex.erase( remove_if ( data_as_hex.begin(), data_as_hex.end(), isspace), data_as_hex.end());
+
+    std::cerr << "D2 after strip, hex_len=" << data_as_hex.size() << std::endl;
+    std::cerr.flush();
 
     if (data_as_hex.empty()) {
         throw Asn1CodecError{"failed attempt to decode IEEE 1609.2 hex string: string empty."};
@@ -1293,9 +1423,19 @@ bool ASN1_Codec::decode_1609dot2_data( std::string& data_as_hex, buffer_structur
     logger->trace(fnname + ": success extracting " + asn_DEF_Ieee1609Dot2Data.name + " hex string: " + data_as_hex );
 
     std::vector<char> byte_buffer;
+
+    std::cerr << "D3 before hex_to_bytes_" << std::endl;
+    std::cerr.flush();
+
     if (!hex_to_bytes_(data_as_hex, byte_buffer)) {
         throw Asn1CodecError{"failed attempt to decode IEEE 1609.2 hex string: cannot convert to bytes."};
     }
+
+    std::cerr << "D4 after hex_to_bytes_, byte_len=" << byte_buffer.size() << std::endl;
+    std::cerr.flush();
+
+    std::cerr << "D5 before asn_decode" << std::endl;
+    std::cerr.flush();
 
     logger->trace(fnname + ": successful conversion to raw byte buffer." );
 
@@ -1308,6 +1448,13 @@ bool ASN1_Codec::decode_1609dot2_data( std::string& data_as_hex, buffer_structur
             byte_buffer.data(), 
             byte_buffer.size() 
             );
+
+    std::cerr << "D6 after asn_decode, code=" << decode_rval.code
+          << " consumed=" << decode_rval.consumed << std::endl;
+    std::cerr.flush();
+
+    std::cerr << "D7 before constraints" << std::endl;
+    std::cerr.flush();
 
     if ( decode_rval.code != RC_OK ) {
         std::ostringstream erroross;
@@ -1325,14 +1472,16 @@ bool ASN1_Codec::decode_1609dot2_data( std::string& data_as_hex, buffer_structur
     logger->trace(fnname + ": ASN.1 binary decode success." );
 
     // check the data in the returned structure against the ASN.1 specification constraints.
-    char errbuf[max_errbuf_size];
-    if (asn_check_constraints( &asn_DEF_Ieee1609Dot2Data, ieee1609data, errbuf, &errlen )) {
-        std::ostringstream erroross;
-        erroross.str("");
-        erroross << "failed ASN.1 constraints check of element " << asn_DEF_Ieee1609Dot2Data.name << ": ";
-        erroross.write( errbuf, errlen );
-        ASN_STRUCT_FREE(asn_DEF_Ieee1609Dot2Data, ieee1609data);
-        throw Asn1CodecError{ erroross.str() };
+    if (validate_constraints) {
+        char errbuf[max_errbuf_size];
+        if (asn_check_constraints(&asn_DEF_Ieee1609Dot2Data, ieee1609data, errbuf, &errlen)) {
+            std::ostringstream erroross;
+            erroross << "failed ASN.1 constraints check of element "
+                    << asn_DEF_Ieee1609Dot2Data.name << ": ";
+            erroross.write(errbuf, errlen);
+            ASN_STRUCT_FREE(asn_DEF_Ieee1609Dot2Data, ieee1609data);
+            throw Asn1CodecError{ erroross.str() };
+        }
     }
 
     // target form is always XML (for now).
@@ -1503,6 +1652,7 @@ void ASN1_Codec::encode_frame_data(const std::string& data_as_xml, std::string& 
     }
 
     char errbuf[max_errbuf_size];
+    
     if (asn_check_constraints( data_struct, frame_data, errbuf, &errlen )) {
         std::ostringstream erroross;
         erroross.str("");
